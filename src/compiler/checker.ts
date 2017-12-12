@@ -6984,13 +6984,52 @@ namespace ts {
                 }
                 else {
                     const declaration = signature.declaration;
-                    signature.resolvedTypePredicate = declaration && declaration.type && declaration.type.kind === SyntaxKind.TypePredicate ?
-                        createTypePredicateFromTypePredicateNode(declaration.type as TypePredicateNode) :
-                        noTypePredicate;
+
+                    if (declaration && declaration.type && declaration.type.kind === SyntaxKind.TypePredicate) {
+                        signature.resolvedTypePredicate = createTypePredicateFromTypePredicateNode(declaration.type as TypePredicateNode);
+                    }
+                    else if (declaration && !declaration.type && declaration.kind === SyntaxKind.ArrowFunction
+                        && declaration.body.kind === SyntaxKind.BinaryExpression
+                        && getReturnTypeOfSignature(signature).flags & TypeFlags.Boolean) {
+
+                        const bin = declaration.body as BinaryExpression;
+                        const l = bin.left;
+                        const r = bin.right;
+                        let narrowed = noTypePredicate;
+                        if (l.kind === SyntaxKind.PropertyAccessExpression) {
+                            const pae = <PropertyAccessExpression>l;
+                            if(pae.expression.kind === SyntaxKind.Identifier) {
+                                const n = (<Identifier>pae.expression).escapedText;
+                                const ps = signature.parameters
+                                    .filter(p => (<Identifier>(<ParameterDeclaration>p.valueDeclaration).name).escapedText === n);
+                                if (ps.length === 1) {
+                                    const p = ps[0];
+                                    const pt = getTypeOfVariableOrParameterOrProperty(p);
+                                    if (isDiscriminantProperty(pt, pae.name.escapedText)) {
+                                        narrowed = createIdentifierTypePredicate(
+                                            n as string,
+                                            signature.parameters.indexOf(p),
+                                            narrowTypeByDiscriminant(pt, pae, t0 => filterType(t0, t1 => isTypeComparableTo(getTypeOfExpression(r), t1))))
+                                    }
+                                }
+                            }
+                        }
+                        signature.resolvedTypePredicate = narrowed;
+                    }
+                    else {
+                        signature.resolvedTypePredicate = noTypePredicate;
+                    }
                 }
                 Debug.assert(!!signature.resolvedTypePredicate);
             }
             return signature.resolvedTypePredicate === noTypePredicate ? undefined : signature.resolvedTypePredicate;
+
+            function narrowTypeByDiscriminant(type: Type, propAccess: PropertyAccessExpression, narrowType: (t: Type) => Type): Type {
+                const propName = propAccess.name.escapedText;
+                const propType = getTypeOfPropertyOfType(type, propName);
+                const narrowedPropType = propType && narrowType(propType);
+                return propType === narrowedPropType ? type : filterType(type, t => isTypeComparableTo(getTypeOfPropertyOfType(t, propName), narrowedPropType));
+            }
         }
 
         function getReturnTypeOfSignature(signature: Signature): Type {
