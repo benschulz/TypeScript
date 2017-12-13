@@ -7016,7 +7016,9 @@ namespace ts {
             return inferTypePredicateFromExpression(arrow.body, false);
 
             function inferTypePredicateFromExpression(expr: Expression, negated: boolean): IdentifierTypePredicate | undefined {
-                switch(expr.kind) {
+                switch (expr.kind) {
+                    case SyntaxKind.CallExpression:
+                        return inferTypePredicateFromCallExpression(expr as CallExpression, negated);
                     case SyntaxKind.ParenthesizedExpression:
                         return inferTypePredicateFromExpression((<ParenthesizedExpression>expr).expression, negated);
                     case SyntaxKind.PrefixUnaryExpression:
@@ -7030,8 +7032,31 @@ namespace ts {
                 }
             }
 
+            function inferTypePredicateFromCallExpression(expr: CallExpression, negated: boolean) {
+                if (negated) {
+                    // We can't deny the antecedent
+                    return undefined;
+                }
+
+                const signature = getResolvedSignature(expr);
+                const typePredicate = getTypePredicateOfSignature(signature);
+
+                if (!typePredicate || !isIdentifierTypePredicate(typePredicate)) {
+                    return undefined;
+                }
+
+                const argument = expr.arguments[typePredicate.parameterIndex];
+                const paramIndex = argument ? findIndex(paramDecls, p => isMatchingReference(p.name, argument)) : -1;
+
+                if (paramIndex >= 0) {
+                    return createIdentifierTypePredicate(params[paramIndex].escapedName as string, paramIndex, typePredicate.type)
+                } else {
+                    return undefined;
+                }
+            }
+
             function inferTypePredicateFromBinaryExpression(expr: BinaryExpression, negated: boolean): IdentifierTypePredicate | undefined {
-                switch(expr.operatorToken.kind) {
+                switch (expr.operatorToken.kind) {
                     case SyntaxKind.EqualsEqualsEqualsToken:
                     case SyntaxKind.ExclamationEqualsEqualsToken:
                         const equality = negated !== (expr.operatorToken.kind === SyntaxKind.EqualsEqualsEqualsToken);
@@ -7075,7 +7100,7 @@ namespace ts {
                         const right = inferTypePredicateFromExpression(expr.right, negated);
 
                         if (left && right && left.parameterIndex == right.parameterIndex) {
-                            if(conjunctive) {
+                            if (conjunctive) {
                                 const impliedType = filterType(left.type, t => isTypeComparableTo(right.type, t));
                                 return createIdentifierTypePredicate(left.parameterName, left.parameterIndex, impliedType);
                             }
