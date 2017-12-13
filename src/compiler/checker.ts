@@ -7013,7 +7013,7 @@ namespace ts {
             const params = signature.parameters;
             const paramDecls = params.map(p => getDeclarationOfKind<ParameterDeclaration>(p, SyntaxKind.Parameter));
 
-            return inferTypePredicateFromExpression(arrow.body, false);
+            return inferTypePredicateFromExpression(arrow.body, /*negated*/ false);
 
             function inferTypePredicateFromExpression(expr: Expression, negated: boolean): IdentifierTypePredicate | undefined {
                 switch (expr.kind) {
@@ -7049,8 +7049,9 @@ namespace ts {
                 const paramIndex = argument ? findIndex(paramDecls, p => isMatchingReference(p.name, argument)) : -1;
 
                 if (paramIndex >= 0) {
-                    return createIdentifierTypePredicate(params[paramIndex].escapedName as string, paramIndex, typePredicate.type)
-                } else {
+                    return createIdentifierTypePredicate(params[paramIndex].escapedName as string, paramIndex, typePredicate.type);
+                }
+                else {
                     return undefined;
                 }
             }
@@ -7085,7 +7086,7 @@ namespace ts {
                                 const filter = (t: Type) => equality === isTypeComparableTo(literalType, t);
                                 const impliedType = narrowTypeByDiscriminant(paramType, propAccess, t0 => filterType(t0, filter));
 
-                                return createIdentifierTypePredicate(param.escapedName as string, paramIndex, impliedType)
+                                return createIdentifierTypePredicate(param.escapedName as string, paramIndex, impliedType);
                             }
 
                             return undefined;
@@ -7099,7 +7100,7 @@ namespace ts {
                         const left = inferTypePredicateFromExpression(expr.left, negated);
                         const right = inferTypePredicateFromExpression(expr.right, negated);
 
-                        if (left && right && left.parameterIndex == right.parameterIndex) {
+                        if (left && right && left.parameterIndex === right.parameterIndex) {
                             if (conjunctive) {
                                 const impliedType = filterType(left.type, t => isTypeComparableTo(right.type, t));
                                 return createIdentifierTypePredicate(left.parameterName, left.parameterIndex, impliedType);
@@ -7130,7 +7131,7 @@ namespace ts {
                     return true;
                 }
                 else if (isEntityNameExpression(expr)) {
-                    const resolved = resolveEntityName(expr, SymbolFlags.Value, true, )
+                    const resolved = resolveEntityName(expr, SymbolFlags.Value, /*ignoreErrors*/ true);
                     // TODO const foo = 'Should this also be considered?';
                     return !!(resolved && (resolved.flags & SymbolFlags.EnumMember));
                 }
