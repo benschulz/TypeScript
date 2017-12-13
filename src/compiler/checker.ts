@@ -6984,13 +6984,184 @@ namespace ts {
                 }
                 else {
                     const declaration = signature.declaration;
-                    signature.resolvedTypePredicate = declaration && declaration.type && declaration.type.kind === SyntaxKind.TypePredicate ?
-                        createTypePredicateFromTypePredicateNode(declaration.type as TypePredicateNode) :
-                        noTypePredicate;
+
+                    if (declaration && declaration.type && declaration.type.kind === SyntaxKind.TypePredicate) {
+                        signature.resolvedTypePredicate = createTypePredicateFromTypePredicateNode(declaration.type as TypePredicateNode);
+                    }
+                    else if (declaration && !declaration.type && declaration.kind === SyntaxKind.ArrowFunction) {
+                        signature.resolvedTypePredicate = inferTypePredicateOfArrowSignature(signature) || noTypePredicate;
+                    }
+                    else {
+                        signature.resolvedTypePredicate = noTypePredicate;
+                    }
                 }
                 Debug.assert(!!signature.resolvedTypePredicate);
             }
             return signature.resolvedTypePredicate === noTypePredicate ? undefined : signature.resolvedTypePredicate;
+        }
+
+        function inferTypePredicateOfArrowSignature(signature: Signature): IdentifierTypePredicate | undefined {
+            Debug.assert(signature.declaration.kind === SyntaxKind.ArrowFunction);
+
+            const arrow = signature.declaration as ArrowFunction;
+
+            // not inferring for blocks is an arbitrary but reasonable choice
+            if (!(getReturnTypeOfSignature(signature).flags & TypeFlags.Boolean) || arrow.body.kind === SyntaxKind.Block) {
+                return undefined;
+            }
+
+            const params = signature.parameters;
+            const paramDecls = params.map(p => getDeclarationOfKind<ParameterDeclaration>(p, SyntaxKind.Parameter));
+
+            return inferTypePredicateFromExpression(arrow.body, /*negated*/ false);
+
+            function inferTypePredicateFromExpression(expr: Expression, negated: boolean): IdentifierTypePredicate | undefined {
+                switch (expr.kind) {
+                    case SyntaxKind.CallExpression:
+                        return inferTypePredicateFromCallExpression(expr as CallExpression, negated);
+                    case SyntaxKind.ParenthesizedExpression:
+                        return inferTypePredicateFromExpression((<ParenthesizedExpression>expr).expression, negated);
+                    case SyntaxKind.PrefixUnaryExpression:
+                        return (<PrefixUnaryExpression>expr).operator === SyntaxKind.ExclamationToken ?
+                            inferTypePredicateFromExpression((<PrefixUnaryExpression>expr).operand, !negated) :
+                            undefined;
+                    case SyntaxKind.BinaryExpression:
+                        return inferTypePredicateFromBinaryExpression(expr as BinaryExpression, negated);
+                    default:
+                        return undefined;
+                }
+            }
+
+            function inferTypePredicateFromCallExpression(expr: CallExpression, negated: boolean) {
+                if (negated) {
+                    // We can't deny the antecedent
+                    return undefined;
+                }
+
+                const signature = getResolvedSignature(expr);
+                const typePredicate = getTypePredicateOfSignature(signature);
+
+                if (!typePredicate || !isIdentifierTypePredicate(typePredicate)) {
+                    return undefined;
+                }
+
+                const argument = expr.arguments[typePredicate.parameterIndex];
+                const paramIndex = argument ? findIndex(paramDecls, p => isMatchingReference(p.name, argument)) : -1;
+
+                if (paramIndex >= 0) {
+                    return createIdentifierTypePredicate(params[paramIndex].escapedName as string, paramIndex, typePredicate.type);
+                }
+                else {
+                    return undefined;
+                }
+            }
+
+            function inferTypePredicateFromBinaryExpression(expr: BinaryExpression, negated: boolean): IdentifierTypePredicate | undefined {
+                switch (expr.operatorToken.kind) {
+                    case SyntaxKind.EqualsEqualsEqualsToken:
+                    case SyntaxKind.ExclamationEqualsEqualsToken:
+                        const equality = negated !== (expr.operatorToken.kind === SyntaxKind.EqualsEqualsEqualsToken);
+                        const leftType = getTypeOfExpression(expr.left);
+                        const rightType = getTypeOfExpression(expr.right);
+                        const isLeftConstant = isStaticallyKnownConstant(expr.left);
+                        if (isLeftConstant === isStaticallyKnownConstant(expr.right)) {
+                            return undefined;
+                        }
+
+                        const literalType = isLeftConstant ? leftType : rightType;
+                        const subject = isLeftConstant ? expr.right : expr.left;
+
+                        if (subject.kind === SyntaxKind.PropertyAccessExpression) {
+                            const propAccess = subject as PropertyAccessExpression;
+                            const paramIndex = findIndex(paramDecls, p => isMatchingReference(p.name, propAccess.expression));
+
+                            if (paramIndex < 0) {
+                                return undefined;
+                            }
+
+                            const param = params[paramIndex];
+                            const paramType = getTypeOfVariableOrParameterOrProperty(param);
+
+                            if (isDiscriminantProperty(paramType, propAccess.name.escapedText)) {
+                                const filter = (t: Type) => equality === isTypeComparableTo(literalType, t);
+                                const impliedType = narrowTypeByDiscriminant(paramType, propAccess, t0 => filterType(t0, filter));
+
+                                return createIdentifierTypePredicate(param.escapedName as string, paramIndex, impliedType);
+                            }
+
+                            return undefined;
+                        }
+                        else {
+                            return undefined;
+                        }
+                    case SyntaxKind.AmpersandAmpersandToken:
+                    case SyntaxKind.BarBarToken:
+                        const conjunctive = negated !== (expr.operatorToken.kind === SyntaxKind.AmpersandAmpersandToken);
+                        const left = inferTypePredicateFromExpression(expr.left, negated);
+                        const right = inferTypePredicateFromExpression(expr.right, negated);
+
+                        if (left && right && left.parameterIndex === right.parameterIndex) {
+                            if (conjunctive) {
+                                const impliedType = filterType(left.type, t => isTypeComparableTo(right.type, t));
+                                return createIdentifierTypePredicate(left.parameterName, left.parameterIndex, impliedType);
+                            }
+                            else {
+                                const impliedType = getUnionType([left.type, right.type], UnionReduction.None);
+                                return createIdentifierTypePredicate(left.parameterName, left.parameterIndex, impliedType);
+                            }
+                        }
+                        else if (conjunctive && (!left || !right)) {
+                            return left || right;
+                        }
+                        else {
+                            return undefined;
+                        }
+                    case SyntaxKind.InstanceOfKeyword:
+                        const paramIndex = findIndex(paramDecls, p => isMatchingReference(p.name, expr.left));
+
+                        if (paramIndex >= 0) {
+                            const param = params[paramIndex];
+                            const paramType = getTypeOfVariableOrParameterOrProperty(param);
+
+                            const constructorType = getTypeOfExpression(expr.right);
+                            const instanceType = getTypeOfPropertyOfType(constructorType, "prototype" as __String);
+                            const filter = (t: Type) => negated !== isTypeComparableTo(instanceType, t);
+                            const impliedType = filterType(paramType, filter);
+                            return createIdentifierTypePredicate(param.escapedName as string, paramIndex, impliedType);
+                        }
+                        else {
+                            return undefined;
+                        }
+                    default:
+                        return undefined;
+                }
+            }
+
+            function isStaticallyKnownConstant(expr: Expression): boolean {
+                const isLiteral = expr.kind === SyntaxKind.TrueKeyword
+                    || expr.kind === SyntaxKind.FalseKeyword
+                    || expr.kind === SyntaxKind.NumericLiteral
+                    || expr.kind === SyntaxKind.StringLiteral;
+
+                if (isLiteral) {
+                    return true;
+                }
+                else if (isEntityNameExpression(expr)) {
+                    const resolved = resolveEntityName(expr, SymbolFlags.Value, /*ignoreErrors*/ true);
+                    // TODO const foo = 'Should this also be considered?';
+                    return !!(resolved && (resolved.flags & SymbolFlags.EnumMember));
+                }
+                else {
+                    return false;
+                }
+            }
+
+            function narrowTypeByDiscriminant(type: Type, propAccess: PropertyAccessExpression, narrowType: (t: Type) => Type): Type {
+                const propName = propAccess.name.escapedText;
+                const propType = getTypeOfPropertyOfType(type, propName);
+                const narrowedPropType = propType && narrowType(propType);
+                return propType === narrowedPropType ? type : filterType(type, t => isTypeComparableTo(getTypeOfPropertyOfType(t, propName), narrowedPropType));
+            }
         }
 
         function getReturnTypeOfSignature(signature: Signature): Type {
